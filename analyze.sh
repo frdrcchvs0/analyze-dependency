@@ -3,19 +3,9 @@
 # ==============================================================================
 # YOUR CUSTOM LOGIC GOES HERE
 # ==============================================================================
-# This function is called for every file in the exact order determined by the 
-# dependency resolution. Right now it just prints the file name, but you can 
-# swap this out for compilation, optimization, testing, or any other logic.
 process_file() {
     local file="$1"
-    
-    # Current behavior: just print the path
     echo "$file"
-    
-    # Future idea example:
-    # if [[ "$file" == *.md ]]; then
-    #     echo "Processing markdown file: $file"
-    # fi
 }
 # ==============================================================================
 
@@ -66,7 +56,7 @@ normalize_path() {
     echo "$1" | sed 's|/\./|/|g; s|^\./||; s|//+|/|g'
 }
 
-# Step 2: Ripple Effect
+# Step 2: Ripple Effect (With Directory Dependency Support)
 find_downstream() {
     local target="$1"
     
@@ -75,13 +65,16 @@ find_downstream() {
     fi
     echo "$target" >> "$AFFECTED_FILES"
     
+    # Find all hidden dependency files
     find . -type f -name ".*" ! -name "$ANCHOR_FILE" | sed 's|^\./||' | while read -r dep_file; do
         local dep_dir=$(dirname "$dep_file")
         local match_found=0
 
+        # Read each line of the dependency file to check for a match
         while IFS= read -r dep_line || [ -n "$dep_line" ]; do
             [ -z "$dep_line" ] && continue
             
+            # Resolve the dependency line path relative to dep_dir
             local resolved_dep=""
             if [[ "$dep_line" == /* ]]; then
                 resolved_dep="${dep_line#/}"
@@ -94,10 +87,21 @@ find_downstream() {
             fi
             resolved_dep=$(normalize_path "$resolved_dep")
 
-            if [ "$resolved_dep" = "$target" ]; then
+            # --- NEW: Check if the dependency is a directory or an exact file match ---
+            if [ -d "$resolved_dep" ]; then
+                # Clean trailing slashes just in case
+                local clean_dir_dep=$(echo "$resolved_dep" | sed 's|/$||')
+                # If our target changed file resides inside this directory dependency
+                if [[ "$target" == "$clean_dir_dep/"* ]]; then
+                    match_found=1
+                    break
+                fi
+            elif [ "$resolved_dep" = "$target" ]; then
+                # Fallback to standard exact file match
                 match_found=1
                 break
             fi
+            # --------------------------------------------------------------------------
         done < "$dep_file"
 
         if [ $match_found -eq 1 ]; then
@@ -117,7 +121,7 @@ while IFS= read -r changed_file; do
 done < "$FILTERED_CHANGED"
 
 
-# Step 3: Topological Sort
+# Step 3: Topological Sort (Ordering the Output)
 sort_dependencies() {
     local file="$1"
     
@@ -136,7 +140,7 @@ sort_dependencies() {
             
             local resolved_dep=""
             if [[ "$dep_line" == /* ]]; then
-                resolved_dep="${del_line#/}"
+                resolved_dep="${dep_line#/}"
             else
                 if [ "$dir" = "." ]; then
                     resolved_dep="$dep_line"
@@ -146,9 +150,20 @@ sort_dependencies() {
             fi
             resolved_dep=$(normalize_path "$resolved_dep")
             
-            if grep -qx "$resolved_dep" "$AFFECTED_FILES"; then
+            # --- NEW: Check if this directory/file dependency is in the affected pool ---
+            if [ -d "$resolved_dep" ]; then
+                local clean_dir_dep=$(echo "$resolved_dep" | sed 's|/$||')
+                # Loop through our affected pool to see if ANY affected file comes from this directory
+                while IFS= read -r affected_file; do
+                    if [[ "$affected_file" == "$clean_dir_dep/"* ]]; then
+                        # If a file in that directory was affected, sort that specific file first!
+                        sort_dependencies "$affected_file"
+                    fi
+                done < "$AFFECTED_FILES"
+            elif grep -qx "$resolved_dep" "$AFFECTED_FILES"; then
                 sort_dependencies "$resolved_dep"
             fi
+            # ----------------------------------------------------------------------------
         done < "$dep_file"
     fi
     
@@ -164,13 +179,11 @@ while IFS= read -r affected_file; do
     sort_dependencies "$affected_file"
 done < "$AFFECTED_FILES"
 
-
-# --- UPDATED: Process the final sorted list using your custom function ---
+# Process the final sorted list
 while IFS= read -r sorted_file; do
     [ -z "$sorted_file" ] && continue
     process_file "$sorted_file"
 done < "$FINAL_LIST"
-# -------------------------------------------------------------------------
 
 # Update our anchor for the next run
 touch "$ANCHOR_FILE"
